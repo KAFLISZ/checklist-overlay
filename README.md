@@ -87,15 +87,3 @@ The built jar lands in `build/libs/checklist-overlay-0.1.0.jar`. Drop it,
 along with the matching **Fabric API** jar for 1.20.1, into your
 `.minecraft/mods` folder.
 
-## Extending it
-
-A few natural next steps if you want to take this further:
-- Resolve item **display names** (not just the raw id) via
-  `Registries.ITEM.get(id).getName()` in `ChecklistEntry` for nicer labels.
-  Currently it just shows the raw id to keep the mod fully offline.
-- Cross-reference against your **actual inventory** (`client.player.getInventory()`)
-  to auto-mark items obtained instead of doing it by hand -- this is the
-  natural bridge to the "read my live inventory" idea we talked about
-  earlier, and it's all local to the client so no extra networking is
-  needed for it either.
-- Group/sort rows (e.g. obtained items at the bottom).
