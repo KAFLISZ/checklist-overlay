@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "checklistoverlay",
+  "version": "${version}",
+  "name": "Checklist Overlay",
+  "description": "Paste a shopping-list string from the web checklist and see it as a movable in-game overlay.",
+  "authors": ["KAFLISZ"],
+  "contact": {},
+  "license": "MIT",
+
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.kaflisz.checklistoverlay.ChecklistOverlayMod"
+    ]
+  },
+
+  "mixins": [],
+
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "minecraft": "~1.20.1",
+    "fabric-api": "*"
+  }
+}
