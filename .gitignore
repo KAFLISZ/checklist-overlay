@@ -3,10 +3,17 @@
 build/
 out/
 !gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
 
 # Fabric Loom
 .loom-cache/
 run/
+
+# Minecraft dev-run artifacts (in case a run/ folder ever lives elsewhere)
+crash-reports/
+logs/
+saves/
+screenshots/
 
 # IDE - IntelliJ
 .idea/
@@ -18,6 +25,7 @@ run/
 .project
 .classpath
 .settings/
+.factorypath
 bin/
 
 # IDE - VS Code
@@ -26,9 +34,14 @@ bin/
 # OS
 .DS_Store
 Thumbs.db
+__MACOSX/
 
-# Logs
+# Logs & crash dumps
 *.log
+hs_err_pid*.log
+
+# Merge/patch leftovers
+*.orig
 
 # Local dev overrides
 gradle.properties.local
