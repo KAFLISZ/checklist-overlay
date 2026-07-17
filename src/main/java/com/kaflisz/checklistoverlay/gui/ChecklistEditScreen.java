@@ -101,10 +101,24 @@ public class ChecklistEditScreen extends Screen {
                 int index = (int) (adjustedY / ChecklistHud.ROW_HEIGHT);
                 
                 if (index >= 0 && index < state.entries.size()) {
-                    if (button == 0) { 
-                        ChecklistEntry entry = state.entries.get(index);
-                        entry.obtained = !entry.obtained;
-                    } else if (button == 1) { 
+                    ChecklistEntry entry = state.entries.get(index);
+                    if (button == 0) {
+                        // Server is authoritative for synced entries -- a manual
+                        // toggle here would just get overwritten by the next
+                        // poll, so only allow it in offline (pasted) mode.
+                        if (!entry.isSynced()) {
+                            entry.obtained = !entry.obtained;
+                        }
+                    } else if (button == 1) {
+                        if (entry.isSynced()) {
+                            // Removes it for everyone syncing to this list, not
+                            // just locally -- fire-and-forget on the background
+                            // executor, then drop it locally right away too so
+                            // the UI doesn't wait on the round-trip.
+                            String serverId = entry.serverId;
+                            ChecklistOverlayMod.runInBackground(() ->
+                                ChecklistOverlayMod.API.deleteItem(serverId));
+                        }
                         state.entries.remove(index);
                         ChecklistOverlayMod.STATE.save();
                     }

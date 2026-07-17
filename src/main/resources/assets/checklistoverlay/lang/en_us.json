@@ -1,6 +1,7 @@
 {
   "key.categories.checklistoverlay": "Checklist Overlay",
-  "key.checklistoverlay.paste": "Open Paste Screen",
+  "key.checklistoverlay.paste": "Open Paste Screen (offline)",
+  "key.checklistoverlay.join": "Join Shared List (online)",
   "key.checklistoverlay.toggle_edit": "Toggle Move/Edit Mode",
   "key.checklistoverlay.toggle_visible": "Show/Hide Overlay"
 }

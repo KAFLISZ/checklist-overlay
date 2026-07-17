@@ -33,8 +33,9 @@ public class ChecklistHud {
         context.fill(x, y, x + width, y + height, bg);
         context.drawBorder(x, y, width, height, border);
 
-        // Header - Add [+] or [-] to show status
-        String headerLabel = "Checklist " + (state.collapsed ? "[+]" : "[-]") + (editMode ? " (drag)" : "");
+        // Header - Add [+] or [-] to show status, plus a sync indicator
+        String syncTag = state.isSyncing() ? " \u2022 synced" : "";
+        String headerLabel = "Checklist " + (state.collapsed ? "[+]" : "[-]") + syncTag + (editMode ? " (drag)" : "");
         context.drawText(client.textRenderer, Text.literal(headerLabel), x + PADDING, y + PADDING, 0xFFFFFF, true);
 
         // NEW: Only render list contents if it's NOT collapsed
@@ -53,7 +54,10 @@ public class ChecklistHud {
 
                     int textColor = entry.obtained ? 0xFF55FF55 : 0xFFDDDDDD;
                     String itemName = stack.getName().getString();
-                    String label = "x" + entry.quantity + "  " + itemName;
+                    String qtyLabel = entry.isSynced()
+                        ? entry.contributedQty + "/" + entry.quantity
+                        : "x" + entry.quantity;
+                    String label = qtyLabel + "  " + itemName;
                     
                     context.drawText(client.textRenderer, Text.literal(label), x + PADDING + 20, rowY + 4, textColor, false);
 
