@@ -1,212 +1,163 @@
 package com.kaflisz.checklistoverlay;
 
-import com.kaflisz.checklistoverlay.gui.ChecklistEditScreen;
-import com.kaflisz.checklistoverlay.gui.ChecklistJoinScreen;
-import com.kaflisz.checklistoverlay.gui.ChecklistPasteScreen;
-import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
-import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.option.KeyBinding;
-import net.minecraft.client.util.InputUtil;
-import net.minecraft.item.Item;
-import org.lwjgl.glfw.GLFW;
+import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.networking.v1.PacketByteBufs;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.network.PacketByteBuf;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.network.ServerPlayerEntity;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
-public class ChecklistOverlayMod implements ClientModInitializer {
-    public static final ChecklistState STATE = new ChecklistState();
-    public static final SupabaseConfig SUPABASE_CONFIG = new SupabaseConfig();
-    public static final ChecklistApi API = new ChecklistApi(SUPABASE_CONFIG);
+/**
+ * Common ("main") entrypoint -- runs on both the dedicated server and the
+ * client's internal singleplayer server, per Fabric's usual convention.
+ * This is where the actual checklist data lives now: every list, its
+ * items, and live group progress are all server-authoritative. Clients
+ * only ever see what the server chooses to push them.
+ */
+public class ChecklistOverlayMod implements ModInitializer {
+    public static final ServerChecklistManager MANAGER = new ServerChecklistManager();
 
-    // Background thread for all blocking HTTP calls, so the render/tick
-    // thread never stalls on network I/O. Results are handed back to the
-    // main thread exclusively through mainThreadQueue below -- STATE.entries
-    // is only ever mutated on the client thread.
-    private static final ScheduledExecutorService SYNC_EXECUTOR =
-        Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "checklist-overlay-sync");
-            t.setDaemon(true);
-            return t;
-        });
-    private static final ConcurrentLinkedQueue<Runnable> mainThreadQueue = new ConcurrentLinkedQueue<>();
-    private static volatile boolean syncInFlight = false;
-
-    private static KeyBinding openPasteKey;
-    private static KeyBinding openJoinKey;
-    private static KeyBinding openEditKey;
-    private static KeyBinding toggleVisibleKey;
+    private int tickCounter = 0;
 
     @Override
-    public void onInitializeClient() {
-        SUPABASE_CONFIG.load();
-        STATE.load();
+    public void onInitialize() {
+        ServerLifecycleEvents.SERVER_STARTED.register(MANAGER::onServerStarted);
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> MANAGER.onServerStopping());
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+            MANAGER.onPlayerDisconnect(handler.getPlayer().getUuid()));
 
-        openPasteKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-            "key.checklistoverlay.paste",
-            InputUtil.Type.KEYSYM,
-            GLFW.GLFW_KEY_SEMICOLON,
-            "key.categories.checklistoverlay"
-        ));
+        ServerTickEvents.END_SERVER_TICK.register(this::onServerTick);
 
-        openJoinKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-            "key.checklistoverlay.join",
-            InputUtil.Type.KEYSYM,
-            GLFW.GLFW_KEY_LEFT_BRACKET,
-            "key.categories.checklistoverlay"
-        ));
-
-        openEditKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-            "key.checklistoverlay.toggle_edit",
-            InputUtil.Type.KEYSYM,
-            GLFW.GLFW_KEY_APOSTROPHE,
-            "key.categories.checklistoverlay"
-        ));
-
-        toggleVisibleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
-            "key.checklistoverlay.toggle_visible",
-            InputUtil.Type.KEYSYM,
-            GLFW.GLFW_KEY_UNKNOWN,
-            "key.categories.checklistoverlay"
-        ));
-
-        HudRenderCallback.EVENT.register(ChecklistHud::render);
-
-        ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            // Drain any results the background sync thread produced since
-            // the last tick. There's normally at most one pending task
-            // (the sync loop waits for the previous round-trip to finish
-            // before scheduling another), so this is cheap.
-            Runnable task;
-            while ((task = mainThreadQueue.poll()) != null) {
-                task.run();
-            }
-
-            if (client.player != null && STATE.visible) {
-                if (STATE.isSyncing()) {
-                    maybeStartSyncRound(client);
-                } else {
-                    // Offline (pasted-string) mode: personal-inventory ratchet,
-                    // exactly as before -- never un-checks once obtained.
-                    for (ChecklistEntry entry : STATE.entries) {
-                        if (entry.obtained) continue;
-                        Item item = entry.resolveStack().getItem();
-                        int count = client.player.getInventory().count(item);
-                        if (count >= entry.quantity) {
-                            entry.obtained = true;
-                        }
-                    }
-                }
-            }
-
-            if (client.currentScreen != null) return;
-
-            while (openPasteKey.wasPressed()) {
-                client.setScreen(new ChecklistPasteScreen());
-            }
-            while (openJoinKey.wasPressed()) {
-                client.setScreen(new ChecklistJoinScreen());
-            }
-            while (openEditKey.wasPressed()) {
-                client.setScreen(new ChecklistEditScreen());
-            }
-            while (toggleVisibleKey.wasPressed()) {
-                STATE.visible = !STATE.visible;
-                STATE.save();
-            }
-        });
+        registerReceivers();
     }
 
-    /**
-     * Kicks off one sync round every ~5 seconds (100 ticks) while joined to
-     * a shared list: report this player's current held counts for every
-     * synced item, then re-fetch the authoritative item list. Only one
-     * round runs at a time -- if a round-trip takes longer than 5 seconds
-     * (slow connection) the next tick simply skips scheduling another until
-     * the in-flight one completes, rather than piling up requests.
-     */
-    private static int tickCounter = 0;
-
-    private static void maybeStartSyncRound(MinecraftClient client) {
+    private void onServerTick(MinecraftServer server) {
         tickCounter++;
-        if (tickCounter < 100) return;
+        if (tickCounter < 100) return; // ~5 seconds at 20 tps
         tickCounter = 0;
 
-        if (syncInFlight || !SUPABASE_CONFIG.isConfigured()) return;
-        if (client.player == null || client.getSession() == null) return;
-
-        String checklistId = STATE.checklistId;
-        String contributor = client.getSession().getUsername();
-
-        // Snapshot each synced entry's target item + how much of it this
-        // player currently holds -- must happen here, on the main thread,
-        // since it touches the player's inventory.
-        List<Map.Entry<String, Integer>> contributions = new ArrayList<>();
-        for (ChecklistEntry entry : STATE.entries) {
-            if (!entry.isSynced()) continue;
-            int count = client.player.getInventory().count(entry.resolveStack().getItem());
-            contributions.add(Map.entry(entry.serverId, count));
+        List<String> activeLists = MANAGER.recomputeAndGetActiveLists(server);
+        for (String listName : activeLists) {
+            broadcastListState(server, listName);
         }
+    }
 
-        syncInFlight = true;
-        SYNC_EXECUTOR.submit(() -> {
-            try {
-                for (Map.Entry<String, Integer> contribution : contributions) {
-                    API.upsertContribution(contribution.getKey(), contributor, contribution.getValue());
-                }
-
-                List<ChecklistApi.RemoteItem> remoteItems = API.fetchItems(checklistId);
-                mainThreadQueue.add(() -> {
-                    // Only apply if we're still syncing the same list -- the
-                    // player may have switched lists while this round was
-                    // in flight.
-                    if (checklistId.equals(STATE.checklistId)) {
-                        STATE.applyRemoteItems(remoteItems);
-                    }
-                });
-            } finally {
-                syncInFlight = false;
-            }
+    private void registerReceivers() {
+        ServerPlayNetworking.registerGlobalReceiver(NetworkChannels.REQUEST_LIST_NAMES, (server, player, handler, buf, sender) -> {
+            server.execute(() -> sendListNames(player));
         });
-    }
 
-    /** Fire-and-forget helper for one-off background calls (e.g. deleting an item). */
-    public static void runInBackground(Runnable task) {
-        SYNC_EXECUTOR.submit(task);
-    }
-
-    /**
-     * Resolves a share code to a checklist id and switches into synced mode.
-     * Runs on the background executor; invokes onResult on the main thread
-     * with either the resolved id or null on failure/not-found.
-     */
-    public static void joinByCode(String code, java.util.function.Consumer<Boolean> onResult) {
-        if (!SUPABASE_CONFIG.isConfigured()) {
-            mainThreadQueue.add(() -> onResult.accept(false));
-            return;
-        }
-
-        SYNC_EXECUTOR.submit(() -> {
-            ChecklistApi.ChecklistMeta meta = API.fetchChecklistMeta(code);
-            if (meta == null) {
-                mainThreadQueue.add(() -> onResult.accept(false));
-                return;
-            }
-
-            List<ChecklistApi.RemoteItem> items = API.fetchItems(meta.id());
-            mainThreadQueue.add(() -> {
-                STATE.startSyncing(code, meta.id());
-                STATE.applyRemoteItems(items);
-                STATE.save();
-                onResult.accept(true);
+        ServerPlayNetworking.registerGlobalReceiver(NetworkChannels.JOIN_LIST, (server, player, handler, buf, sender) -> {
+            String listName = buf.readString(64);
+            server.execute(() -> {
+                if (MANAGER.getList(listName) == null) {
+                    sendError(player, "That list no longer exists.");
+                    return;
+                }
+                MANAGER.joinList(player.getUuid(), listName);
+                sendListState(player, listName);
             });
         });
+
+        ServerPlayNetworking.registerGlobalReceiver(NetworkChannels.LEAVE_LIST, (server, player, handler, buf, sender) -> {
+            server.execute(() -> MANAGER.leaveList(player.getUuid()));
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(NetworkChannels.CREATE_LIST, (server, player, handler, buf, sender) -> {
+            String name = buf.readString(64);
+            server.execute(() -> {
+                if (MANAGER.createList(name)) {
+                    MANAGER.joinList(player.getUuid(), name);
+                    sendListState(player, name);
+                    broadcastListNamesToAll(server);
+                } else {
+                    sendError(player, "Couldn't create that list (blank, too long, or name already taken).");
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(NetworkChannels.ADD_ITEM, (server, player, handler, buf, sender) -> {
+            String listName = buf.readString(64);
+            String itemId = buf.readString(256);
+            int targetQty = buf.readVarInt();
+            server.execute(() -> {
+                if (MANAGER.addItem(listName, itemId, targetQty)) {
+                    broadcastListStateToMembers(server, listName);
+                } else {
+                    sendError(player, "Couldn't add that item -- list may no longer exist.");
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(NetworkChannels.REMOVE_ITEM, (server, player, handler, buf, sender) -> {
+            String listName = buf.readString(64);
+            java.util.UUID itemId = buf.readUuid();
+            server.execute(() -> {
+                if (MANAGER.removeItem(listName, itemId)) {
+                    broadcastListStateToMembers(server, listName);
+                }
+            });
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Outgoing packet helpers
+    // ---------------------------------------------------------------
+
+    private void sendListNames(ServerPlayerEntity player) {
+        PacketByteBuf buf = PacketByteBufs.create();
+        List<String> names = MANAGER.getListNames();
+        buf.writeVarInt(names.size());
+        for (String name : names) buf.writeString(name);
+        ServerPlayNetworking.send(player, NetworkChannels.LIST_NAMES, buf);
+    }
+
+    private void broadcastListNamesToAll(MinecraftServer server) {
+        for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+            sendListNames(p);
+        }
+    }
+
+    private void sendListState(ServerPlayerEntity player, String listName) {
+        ServerChecklist list = MANAGER.getList(listName);
+        if (list == null) return;
+        ServerPlayNetworking.send(player, NetworkChannels.LIST_STATE, encodeListState(list));
+    }
+
+    private void broadcastListState(MinecraftServer server, String listName) {
+        broadcastListStateToMembers(server, listName);
+    }
+
+    private void broadcastListStateToMembers(MinecraftServer server, String listName) {
+        ServerChecklist list = MANAGER.getList(listName);
+        if (list == null) return;
+        for (ServerPlayerEntity p : MANAGER.playersJoinedTo(server, listName)) {
+            ServerPlayNetworking.send(p, NetworkChannels.LIST_STATE, encodeListState(list));
+        }
+    }
+
+    private static PacketByteBuf encodeListState(ServerChecklist list) {
+        PacketByteBuf buf = PacketByteBufs.create();
+        buf.writeString(list.name);
+        buf.writeVarInt(list.items.size());
+        for (ServerChecklistItem item : list.items) {
+            buf.writeUuid(item.id);
+            buf.writeString(item.itemId);
+            buf.writeVarInt(item.targetQty);
+            buf.writeVarInt(item.contributedQty);
+            buf.writeBoolean(item.obtained);
+        }
+        return buf;
+    }
+
+    private static void sendError(ServerPlayerEntity player, String message) {
+        PacketByteBuf buf = PacketByteBufs.create();
+        buf.writeString(message);
+        ServerPlayNetworking.send(player, NetworkChannels.ERROR_MESSAGE, buf);
     }
 }

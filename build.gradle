@@ -15,9 +15,10 @@ repositories {
 }
 
 loom {
-	// Everything lives in src/main -- this mod only ever registers a
-	// "client" entrypoint in fabric.mod.json, so a split source set
-	// isn't needed for a project this small.
+	// Everything lives in src/main. A ModInitializer ("main" entrypoint)
+	// already runs on both the dedicated server and the client's internal
+	// server, so this mod's server-side code doesn't need a separate
+	// source set -- just a single jar installed on both sides.
 }
 
 dependencies {
